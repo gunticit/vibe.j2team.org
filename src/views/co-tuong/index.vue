@@ -532,8 +532,8 @@ function setupPeerConnection(stream: MediaStream | null) {
 function setupDataChannel(ch: RTCDataChannel) {
   dataChannel = ch
   ch.onopen = () => {
-    // Auto-enter game when channel opens
-    if (connState.value === 'joining' || connState.value === 'waiting-answer') {
+    // Auto-enter game when channel opens (covers ALL connection states)
+    if (connState.value === 'joining' || connState.value === 'creating-offer' || connState.value === 'waiting-answer') {
       enterOnlineGame()
     } else if (connState.value === 'spectator-joining') {
       enterSpectator()
@@ -657,6 +657,19 @@ function enterOnlineGame() {
   gameMode.value = 'online-play'
   if (answerSdp.value) { myColor.value = 'black'; isFlipped.value = true }
   else { myColor.value = 'red'; isFlipped.value = false }
+  resetGame()
+  // Re-attach video streams after DOM renders the <video> elements
+  nextTick(() => {
+    if (localVideoRef.value && localStream.value) {
+      localVideoRef.value.srcObject = localStream.value
+      localVideoRef.value.play().catch(() => {})
+    }
+    if (remoteVideoRef.value && remoteStream.value) {
+      remoteVideoRef.value.srcObject = remoteStream.value
+      remoteVideoRef.value.play().catch(() => {})
+    }
+    drawBoard()
+  })
   sendSync()
 }
 
