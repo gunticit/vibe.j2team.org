@@ -352,7 +352,7 @@ const remoteVideoRef = ref<HTMLVideoElement | null>(null)
 const offerSdp = ref(''); const answerSdp = ref('')
 const pastedOffer = ref(''); const pastedAnswer = ref('')
 const isMuted = ref(false); const isCameraOff = ref(false)
-const copied = ref(false); const connError = ref('')
+const copied = ref(false); const connError = ref(''); const iceProgress = ref('')
 
 let pc: RTCPeerConnection | null = null
 let dataChannel: RTCDataChannel | null = null
@@ -407,9 +407,19 @@ function setupDataChannel(ch: RTCDataChannel) {
 
 function waitIce(conn: RTCPeerConnection): Promise<string> {
   return new Promise((resolve) => {
-    const done = () => resolve(JSON.stringify(conn.localDescription))
+    let resolved = false
+    const done = () => { if (resolved) return; resolved = true; iceProgress.value = ''; resolve(JSON.stringify(conn.localDescription)) }
     if (conn.iceGatheringState === 'complete') { done(); return }
-    const t = setTimeout(() => { conn.onicegatheringstatechange = null; done() }, 10000)
+    iceProgress.value = 'Đang thu thập kết nối...'
+    // Resolve early once we have a server-reflexive candidate (fast path)
+    conn.onicecandidate = (e) => {
+      if (!e.candidate) { done(); return }
+      if (e.candidate.type === 'srflx' || e.candidate.type === 'relay') {
+        iceProgress.value = 'Đã tìm thấy đường truyền!'
+        setTimeout(done, 500) // short delay to collect a few more
+      }
+    }
+    const t = setTimeout(done, 3000) // 3s hard timeout (was 10s)
     conn.onicegatheringstatechange = () => {
       if (conn.iceGatheringState === 'complete') { clearTimeout(t); done() }
     }
@@ -417,7 +427,7 @@ function waitIce(conn: RTCPeerConnection): Promise<string> {
 }
 
 async function createRoom() {
-  connState.value = 'creating-offer'; connError.value = ''
+  connState.value = 'creating-offer'; connError.value = ''; iceProgress.value = 'Đang khởi tạo...'
   try {
     const stream = await startMedia()
     const conn = setupPeerConnection(stream)
@@ -672,12 +682,12 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
 
         <div class="grid gap-5 sm:grid-cols-2 max-w-md w-full animate-fade-up animate-delay-1">
           <button class="ancient-card group" @click="startLocal">
-            <svg class="w-8 h-8 ancient-gold mb-3 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.local" />
+            <svg class="w-8 h-8 mx-auto ancient-gold mb-3 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.local" />
             <p class="font-display text-lg font-semibold mb-1 ancient-gold">Đối Ẩm Kỳ Cuộc</p>
             <p class="text-sm ancient-dim">Hai người, một bàn cờ</p>
           </button>
           <button class="ancient-card group" @click="startOnline">
-            <svg class="w-8 h-8 ancient-gold mb-3 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.online" />
+            <svg class="w-8 h-8 mx-auto ancient-gold mb-3 group-hover:scale-110 transition-transform" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.online" />
             <p class="font-display text-lg font-semibold mb-1 ancient-gold">Thiên Hạ Kỳ Thủ</p>
             <p class="text-sm ancient-dim">Giao đấu qua WebRTC</p>
           </button>
@@ -704,16 +714,14 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
         <!-- IDLE -->
         <div v-if="connState === 'idle'" class="space-y-4">
           <div class="grid gap-4 sm:grid-cols-2">
-            <button class="ancient-card text-left" @click="createRoom">
-              <svg class="w-6 h-6 ancient-gold mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.signal" />
+            <button class="ancient-card" @click="createRoom">
+              <svg class="w-6 h-6 mx-auto ancient-gold mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.signal" />
               <p class="font-display font-semibold mb-1 ancient-gold">Lập Kỳ Đài</p>
               <p class="text-xs ancient-dim">Tạo mã thiệp mời đối thủ</p>
             </button>
-            <div class="ancient-panel">
-              <div class="flex items-center gap-2 mb-2">
-                <svg class="w-5 h-5 ancient-gold" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.join" />
-                <p class="font-display font-semibold ancient-gold">Nhập Cuộc</p>
-              </div>
+            <div class="ancient-panel text-center">
+              <svg class="w-5 h-5 mx-auto ancient-gold mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.join" />
+              <p class="font-display font-semibold ancient-gold mb-2">Nhập Cuộc</p>
               <textarea v-model="pastedOffer" placeholder="Dán thiệp mời tại đây..." class="ancient-textarea h-16" />
               <button class="mt-2 w-full ancient-btn-accent" :disabled="!pastedOffer.trim()" @click="joinRoom">Kết Nối</button>
             </div>
@@ -722,10 +730,15 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
 
         <!-- CREATING OFFER -->
         <div v-if="connState === 'creating-offer'" class="space-y-4">
+          <!-- ICE loading indicator -->
+          <div v-if="iceProgress && !offerSdp" class="ancient-panel text-center">
+            <div class="ice-spinner mx-auto mb-2" />
+            <p class="ancient-gold text-sm font-display">{{ iceProgress }}</p>
+          </div>
           <div class="ancient-panel">
             <p class="font-display text-sm font-semibold ancient-gold mb-2">Bước nhất · Sao chép thiệp mời</p>
             <textarea :value="offerSdp" readonly class="ancient-textarea h-20" />
-            <button class="mt-2 w-full ancient-btn-primary" @click="safeCopy(offerSdp)">
+            <button class="mt-2 w-full ancient-btn-primary" :disabled="!offerSdp" @click="safeCopy(offerSdp)">
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" v-html="copied ? svgIcons.check : svgIcons.copy" />
               {{ copied ? 'Đã sao chép!' : 'Sao chép thiệp mời' }}
             </button>
@@ -1038,6 +1051,16 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
 /* Canvas */
 canvas { image-rendering: -webkit-optimize-contrast; touch-action: none; }
 video { background: #0A0704; }
+
+/* ICE loading spinner */
+.ice-spinner {
+  width: 24px; height: 24px;
+  border: 2px solid #2E231A;
+  border-top-color: #C8A96E;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Animations */
 @keyframes pulse-glow {
