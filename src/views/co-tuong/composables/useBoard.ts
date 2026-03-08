@@ -1,5 +1,5 @@
 import { ref, type Ref } from 'vue'
-import type { Board, PieceColor, Turn } from '../types'
+import type { Board, Turn } from '../types'
 import { PIECE_CHAR } from '../constants'
 import { findKing } from './useGameEngine'
 

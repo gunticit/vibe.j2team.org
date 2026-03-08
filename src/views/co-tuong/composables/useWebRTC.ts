@@ -1,7 +1,7 @@
 import { ref, nextTick } from 'vue'
-import type { Board, Turn, Move, PieceColor, ConnectionState } from '../types'
+import type { Board, Turn, Move, ConnectionState } from '../types'
 import { ICE_CFG } from '../constants'
-import { initBoard } from './useGameEngine'
+
 
 export interface WebRTCCallbacks {
     onRemoteMove: (from: [number, number], to: [number, number]) => void

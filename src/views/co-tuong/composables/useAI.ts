@@ -56,7 +56,7 @@ function minimax(b: Board, depth: number, alpha: number, beta: number, maximizin
         let best = -Infinity
         for (const m of moves) {
             const nb = cloneBoard(b)
-            nb[m.tr]![m.tc] = nb[m.fr]![m.fc]; nb[m.fr]![m.fc] = null
+            nb[m.tr]![m.tc] = nb[m.fr]![m.fc] ?? null; nb[m.fr]![m.fc] = null
             const val = minimax(nb, depth - 1, alpha, beta, false, aiCol)
             best = Math.max(best, val); alpha = Math.max(alpha, val)
             if (beta <= alpha) break
@@ -66,7 +66,7 @@ function minimax(b: Board, depth: number, alpha: number, beta: number, maximizin
         let best = Infinity
         for (const m of moves) {
             const nb = cloneBoard(b)
-            nb[m.tr]![m.tc] = nb[m.fr]![m.fc]; nb[m.fr]![m.fc] = null
+            nb[m.tr]![m.tc] = nb[m.fr]![m.fc] ?? null; nb[m.fr]![m.fc] = null
             const val = minimax(nb, depth - 1, alpha, beta, true, aiCol)
             best = Math.min(best, val); beta = Math.min(beta, val)
             if (beta <= alpha) break
@@ -84,7 +84,7 @@ function findBestMove(b: Board, aiCol: PieceColor): { fr: number; fc: number; tr
 
     for (const m of moves) {
         const nb = cloneBoard(b)
-        nb[m.tr]![m.tc] = nb[m.fr]![m.fc]; nb[m.fr]![m.fc] = null
+        nb[m.tr]![m.tc] = nb[m.fr]![m.fc] ?? null; nb[m.fr]![m.fc] = null
         const score = minimax(nb, depth - 1, -Infinity, Infinity, false, aiCol)
         if (score > bestScore) { bestScore = score; bestMove = m }
     }
