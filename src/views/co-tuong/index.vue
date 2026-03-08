@@ -10,8 +10,8 @@ type PieceType = 'K' | 'A' | 'E' | 'H' | 'R' | 'C' | 'P'
 type PieceColor = 'red' | 'black'
 type GameMode = 'menu' | 'local' | 'ai' | 'online-setup' | 'online-play' | 'spectator'
 type AiDifficulty = 'medium'
+type ConnectionState = 'idle' | 'creating-offer' | 'waiting-answer' | 'joining' | 'spectator-joining' | 'connected'
 type Turn = 'red' | 'black'
-type ConnectionState = 'idle' | 'creating-offer' | 'waiting-answer' | 'joining' | 'connected'
 
 interface Piece { type: PieceType; color: PieceColor }
 type Board = (Piece | null)[][]
@@ -475,6 +475,8 @@ const offerSdp = ref(''); const answerSdp = ref('')
 const pastedOffer = ref(''); const pastedAnswer = ref('')
 const isMuted = ref(false); const isCameraOff = ref(false)
 const copied = ref(false); const connError = ref(''); const iceProgress = ref('')
+const hasCamera = ref(false); const spectatorCount = ref(0)
+const spectatorChannels: RTCDataChannel[] = []
 
 let pc: RTCPeerConnection | null = null
 let dataChannel: RTCDataChannel | null = null
@@ -485,19 +487,30 @@ function sdpDecode(s: string): string {
   try { return atob(t) } catch { return t }
 }
 
-async function startMedia() {
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-  localStream.value = stream
-  await nextTick()
-  if (localVideoRef.value) { localVideoRef.value.srcObject = stream; localVideoRef.value.play() }
-  return stream
+// Try to get camera/mic — returns stream or null if denied/unavailable
+async function tryStartMedia(): Promise<MediaStream | null> {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    localStream.value = stream
+    hasCamera.value = true
+    await nextTick()
+    if (localVideoRef.value) { localVideoRef.value.srcObject = stream; localVideoRef.value.play().catch(() => {}) }
+    return stream
+  } catch {
+    // Camera denied or unavailable — proceed without
+    hasCamera.value = false
+    return null
+  }
 }
 
-function setupPeerConnection(stream: MediaStream) {
+function setupPeerConnection(stream: MediaStream | null) {
   pc = new RTCPeerConnection(ICE_CFG)
   remoteStream.value = new MediaStream()
 
-  for (const track of stream.getTracks()) pc.addTrack(track, stream)
+  // Only add tracks if we have a media stream
+  if (stream) {
+    for (const track of stream.getTracks()) pc.addTrack(track, stream)
+  }
 
   pc.ontrack = (e) => {
     const s = e.streams[0]
@@ -508,8 +521,9 @@ function setupPeerConnection(stream: MediaStream) {
   pc.oniceconnectionstatechange = () => {
     if (pc?.iceConnectionState === 'connected' && connState.value !== 'joining')
       connState.value = 'connected'
-    if (pc?.iceConnectionState === 'failed' && connState.value === 'connected')
-      disconnectRTC()
+    if (pc?.iceConnectionState === 'failed' || pc?.iceConnectionState === 'disconnected') {
+      connError.value = 'Kết nối đã mất. Vui lòng thử lại.'
+    }
   }
 
   return pc
@@ -517,13 +531,39 @@ function setupPeerConnection(stream: MediaStream) {
 
 function setupDataChannel(ch: RTCDataChannel) {
   dataChannel = ch
+  ch.onopen = () => {
+    // Auto-enter game when channel opens
+    if (connState.value === 'joining' || connState.value === 'waiting-answer') {
+      enterOnlineGame()
+    } else if (connState.value === 'spectator-joining') {
+      enterSpectator()
+    }
+  }
   ch.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
-      if (msg.type === 'move') handleRemoteMove(msg.from, msg.to)
-      if (msg.type === 'resign') handleRemoteResign()
+      if (msg.type === 'move') {
+        handleRemoteMove(msg.from, msg.to)
+        // Broadcast to spectators
+        broadcastToSpectators(e.data)
+      }
+      if (msg.type === 'resign') {
+        handleRemoteResign()
+        broadcastToSpectators(e.data)
+      }
       if (msg.type === 'sync') handleRemoteSync(msg)
+      if (msg.type === 'spectator-join') {
+        spectatorCount.value++
+        // Send current game state to new spectator
+        ch.send(JSON.stringify({ type: 'sync', board: board.value, turn: turn.value, moveHistory: moveHistory.value }))
+      }
     } catch { /* ignore */ }
+  }
+}
+
+function broadcastToSpectators(data: string) {
+  for (const ch of spectatorChannels) {
+    if (ch.readyState === 'open') ch.send(data)
   }
 }
 
@@ -533,15 +573,14 @@ function waitIce(conn: RTCPeerConnection): Promise<string> {
     const done = () => { if (resolved) return; resolved = true; iceProgress.value = ''; resolve(JSON.stringify(conn.localDescription)) }
     if (conn.iceGatheringState === 'complete') { done(); return }
     iceProgress.value = 'Đang thu thập kết nối...'
-    // Resolve early once we have a server-reflexive candidate (fast path)
     conn.onicecandidate = (e) => {
       if (!e.candidate) { done(); return }
       if (e.candidate.type === 'srflx' || e.candidate.type === 'relay') {
         iceProgress.value = 'Đã tìm thấy đường truyền!'
-        setTimeout(done, 500) // short delay to collect a few more
+        setTimeout(done, 500)
       }
     }
-    const t = setTimeout(done, 3000) // 3s hard timeout (was 10s)
+    const t = setTimeout(done, 3000)
     conn.onicegatheringstatechange = () => {
       if (conn.iceGatheringState === 'complete') { clearTimeout(t); done() }
     }
@@ -551,7 +590,7 @@ function waitIce(conn: RTCPeerConnection): Promise<string> {
 async function createRoom() {
   connState.value = 'creating-offer'; connError.value = ''; iceProgress.value = 'Đang khởi tạo...'
   try {
-    const stream = await startMedia()
+    const stream = await tryStartMedia()
     const conn = setupPeerConnection(stream)
     const ch = conn.createDataChannel('chess')
     setupDataChannel(ch)
@@ -560,7 +599,7 @@ async function createRoom() {
     const sdp = await waitIce(conn)
     offerSdp.value = sdpEncode(sdp)
   } catch (err) {
-    connError.value = 'Không thể bật camera/mic. Vui lòng cấp quyền.'
+    connError.value = 'Không thể tạo kết nối. Vui lòng thử lại.'
     connState.value = 'idle'
   }
 }
@@ -568,7 +607,7 @@ async function createRoom() {
 async function joinRoom() {
   connState.value = 'joining'; connError.value = ''
   try {
-    const stream = await startMedia()
+    const stream = await tryStartMedia()
     const conn = setupPeerConnection(stream)
     conn.ondatachannel = (e) => setupDataChannel(e.channel)
     const decoded = sdpDecode(pastedOffer.value)
@@ -577,10 +616,28 @@ async function joinRoom() {
     await conn.setLocalDescription(answer)
     const sdp = await waitIce(conn)
     answerSdp.value = sdpEncode(sdp)
-    // Auto copy
     safeCopy(answerSdp.value)
   } catch {
-    connError.value = 'Mã mời không hợp lệ.'
+    connError.value = 'Mã mời không hợp lệ hoặc đã hết hạn.'
+    connState.value = 'idle'
+  }
+}
+
+async function joinAsSpectator() {
+  connState.value = 'spectator-joining'; connError.value = ''
+  try {
+    // Spectator: no camera, DataChannel only
+    const conn = setupPeerConnection(null)
+    conn.ondatachannel = (e) => setupDataChannel(e.channel)
+    const decoded = sdpDecode(pastedOffer.value)
+    await conn.setRemoteDescription(JSON.parse(decoded))
+    const answer = await conn.createAnswer()
+    await conn.setLocalDescription(answer)
+    const sdp = await waitIce(conn)
+    answerSdp.value = sdpEncode(sdp)
+    safeCopy(answerSdp.value)
+  } catch {
+    connError.value = 'Mã phòng không hợp lệ.'
     connState.value = 'idle'
   }
 }
@@ -590,33 +647,51 @@ async function acceptAnswer() {
   try {
     const decoded = sdpDecode(pastedAnswer.value)
     await pc.setRemoteDescription(JSON.parse(decoded))
+    // Auto-enter after accepting answer if DataChannel is already open
+    if (dataChannel?.readyState === 'open') enterOnlineGame()
   } catch { connError.value = 'Mã trả lời không hợp lệ.' }
 }
 
 function enterOnlineGame() {
   connState.value = 'connected'
   gameMode.value = 'online-play'
-  // Joiner plays black (board flipped), creator plays red
   if (answerSdp.value) { myColor.value = 'black'; isFlipped.value = true }
   else { myColor.value = 'red'; isFlipped.value = false }
   sendSync()
 }
 
+function enterSpectator() {
+  connState.value = 'connected'
+  gameMode.value = 'spectator'
+  isFlipped.value = false
+  // Tell host we're a spectator
+  dataChannel?.send(JSON.stringify({ type: 'spectator-join' }))
+}
+
 function sendMove(from: [number, number], to: [number, number]) {
-  dataChannel?.send(JSON.stringify({ type: 'move', from, to }))
+  const data = JSON.stringify({ type: 'move', from, to })
+  dataChannel?.send(data)
+  broadcastToSpectators(data)
 }
 
 function sendSync() {
   const state = { type: 'sync', board: board.value, turn: turn.value, moveHistory: moveHistory.value }
-  dataChannel?.send(JSON.stringify(state))
+  const data = JSON.stringify(state)
+  dataChannel?.send(data)
+  broadcastToSpectators(data)
 }
 
-function sendResign() { dataChannel?.send(JSON.stringify({ type: 'resign' })) }
+function sendResign() {
+  const data = JSON.stringify({ type: 'resign' })
+  dataChannel?.send(data)
+  broadcastToSpectators(data)
+}
 
 function disconnectRTC() {
   pc?.close(); pc = null; dataChannel = null
+  spectatorChannels.length = 0; spectatorCount.value = 0
   localStream.value?.getTracks().forEach(t => t.stop())
-  localStream.value = null; remoteStream.value = null
+  localStream.value = null; remoteStream.value = null; hasCamera.value = false
   connState.value = 'idle'; offerSdp.value = ''; answerSdp.value = ''
   pastedOffer.value = ''; pastedAnswer.value = ''
 }
@@ -781,6 +856,7 @@ const svgIcons = {
   play: '<path d="M8 5v14l11-7z"/>',
   scroll: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5 0 1.52-.98 2.82-2.34 3.3C14.81 13.56 16 15.03 16 17H8c0-1.97 1.19-3.44 2.84-4.2C9.48 12.32 8.5 11.02 8.5 9.5 8.5 7.57 10.07 6 12 6z"/>',
   robot: '<path d="M20 9V7c0-1.1-.9-2-2-2h-3c0-1.66-1.34-3-3-3S9 3.34 9 5H6c-1.1 0-2 .9-2 2v2c-1.66 0-3 1.34-3 3s1.34 3 3 3v4c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-4c1.66 0 3-1.34 3-3s-1.34-3-3-3zM7.5 11.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5S9.83 13 9 13s-1.5-.67-1.5-1.5zM16 17H8v-2h8v2zm-1-4c-.83 0-1.5-.67-1.5-1.5S14.17 10 15 10s1.5.67 1.5 1.5S15.83 13 15 13z"/>',
+  eye: '<path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>',
 }
 
 onMounted(() => { window.addEventListener('resize', () => { if (gameMode.value !== 'menu') drawBoard() }) })
@@ -858,7 +934,13 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
               <svg class="w-5 h-5 mx-auto ancient-gold mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.join" />
               <p class="font-display font-semibold ancient-gold mb-2">Nhập Cuộc</p>
               <textarea v-model="pastedOffer" placeholder="Dán thiệp mời tại đây..." class="ancient-textarea h-16" />
-              <button class="mt-2 w-full ancient-btn-accent" :disabled="!pastedOffer.trim()" @click="joinRoom">Kết Nối</button>
+              <div class="flex gap-2 mt-2">
+                <button class="flex-1 ancient-btn-accent" :disabled="!pastedOffer.trim()" @click="joinRoom">Giao Đấu</button>
+                <button class="flex-1 ancient-btn-ghost text-xs" :disabled="!pastedOffer.trim()" @click="joinAsSpectator">
+                  <svg class="w-3.5 h-3.5 inline mr-1" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.eye" />
+                  Khán Đài
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -885,8 +967,8 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
           </div>
         </div>
 
-        <!-- JOINING -->
-        <div v-if="connState === 'joining'" class="space-y-4">
+        <!-- JOINING / SPECTATOR-JOINING -->
+        <div v-if="connState === 'joining' || connState === 'spectator-joining'" class="space-y-4">
           <div class="ancient-panel">
             <p class="font-display text-sm font-semibold ancient-gold mb-2">Hồi tín · Gửi cho kỳ chủ</p>
             <textarea :value="answerSdp" readonly class="ancient-textarea h-20" />
@@ -930,8 +1012,8 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
         </div>
 
         <div class="flex flex-col lg:flex-row gap-4 items-start">
-          <!-- Webcam panels (online) -->
-          <div v-if="gameMode === 'online-play'" class="w-full lg:w-48 flex lg:flex-col gap-2">
+          <!-- Webcam panels (online with camera) -->
+          <div v-if="gameMode === 'online-play' && hasCamera" class="w-full lg:w-48 flex lg:flex-col gap-2">
             <div class="flex-1 ancient-panel overflow-hidden relative p-0">
               <video ref="remoteVideoRef" autoplay playsinline muted class="w-full aspect-video object-cover" style="transform: scaleX(-1)" />
               <span class="absolute bottom-1 left-1 text-xs px-1.5 py-0.5 font-display" :class="myColor === 'red' ? 'ancient-silver' : 'text-[#C84B31]'" style="background: rgba(15,10,5,0.8)">{{ myColor === 'red' ? '黑 Đối thủ' : '紅 Đối thủ' }}</span>
@@ -947,6 +1029,23 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
               <button class="flex-1 ancient-btn-sm" @click="toggleCamera">
                 <svg class="w-4 h-4 mx-auto" viewBox="0 0 24 24" fill="currentColor" v-html="isCameraOff ? svgIcons.camOff : svgIcons.cam" />
               </button>
+            </div>
+          </div>
+
+          <!-- No camera banner -->
+          <div v-if="gameMode === 'online-play' && !hasCamera" class="w-full lg:w-48">
+            <div class="ancient-panel text-center py-4">
+              <svg class="w-6 h-6 mx-auto ancient-dim mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.camOff" />
+              <p class="text-xs ancient-dim">Chơi không camera</p>
+            </div>
+          </div>
+
+          <!-- Spectator badge -->
+          <div v-if="gameMode === 'spectator'" class="w-full lg:w-48">
+            <div class="ancient-panel text-center py-4">
+              <svg class="w-8 h-8 mx-auto ancient-gold mb-2" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.eye" />
+              <p class="text-sm ancient-gold font-display">觀 Khán Đài</p>
+              <p class="text-xs ancient-dim mt-1">Chỉ xem, không tham chiến</p>
             </div>
           </div>
 
