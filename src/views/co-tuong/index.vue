@@ -304,7 +304,7 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
           <!-- Webcam panels (online with camera) -->
           <div v-if="gameMode === 'online-play' && rtc.hasCamera.value" class="w-full lg:w-48 flex lg:flex-col gap-2">
             <div class="flex-1 ancient-panel overflow-hidden relative p-0">
-              <video ref="rtc.remoteVideoRef.value" autoplay playsinline muted class="w-full aspect-video object-cover" style="transform: scaleX(-1)" />
+              <video :ref="(el: any) => { rtc.remoteVideoRef.value = el }" autoplay playsinline muted class="w-full aspect-video object-cover" style="transform: scaleX(-1)" />
               <span class="absolute bottom-1 left-1 text-xs px-1.5 py-0.5 font-display" :class="myColor === 'red' ? 'ancient-silver' : 'text-[#C84B31]'" style="background: rgba(15,10,5,0.8)">{{ myColor === 'red' ? '黑 Đối thủ' : '紅 Đối thủ' }}</span>
               <span v-if="rtc.remoteMuted.value" class="absolute top-1 right-1 p-1 rounded" style="background: rgba(15,10,5,0.8)">
                 <svg class="w-3.5 h-3.5 text-red-400" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.micOff" />
@@ -314,7 +314,7 @@ watch(board, () => { nextTick(drawBoard) }, { deep: true })
               </span>
             </div>
             <div class="flex-1 ancient-panel overflow-hidden relative p-0">
-              <video ref="rtc.localVideoRef.value" autoplay playsinline muted class="w-full aspect-video object-cover" style="transform: scaleX(-1)" />
+              <video :ref="(el: any) => { rtc.localVideoRef.value = el }" autoplay playsinline muted class="w-full aspect-video object-cover" style="transform: scaleX(-1)" />
               <span class="absolute bottom-1 left-1 text-xs px-1.5 py-0.5 font-display" :class="myColor === 'red' ? 'text-[#C84B31]' : 'ancient-silver'" style="background: rgba(15,10,5,0.8)">{{ myColor === 'red' ? '紅 Bạn' : '黑 Bạn' }}</span>
               <span v-if="rtc.isMuted.value" class="absolute top-1 right-1 p-1 rounded" style="background: rgba(15,10,5,0.8)">
                 <svg class="w-3.5 h-3.5 text-yellow-400" viewBox="0 0 24 24" fill="currentColor" v-html="svgIcons.micOff" />
